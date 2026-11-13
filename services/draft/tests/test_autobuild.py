@@ -29,6 +29,11 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             prepare_candidate(BASE, CANDIDATE.replace('CMD ["./hello"]', 'CMD ["echo", "hello E3"]'))
 
+    def test_second_from_rejected_before_build(self):
+        candidate = CANDIDATE.replace("WORKDIR /work", "FROM busybox:1.37\nWORKDIR /work")
+        with self.assertRaisesRegex(ValueError, "single-stage"):
+            prepare_candidate(BASE, candidate)
+
     def test_missing_make_is_expected(self):
         self.assertEqual(classify_failure("/bin/sh: 1: make: not found"), "MISSING_MAKE")
 

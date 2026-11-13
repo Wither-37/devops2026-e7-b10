@@ -1,4 +1,4 @@
-"""Two-attempt teaching workflow; no autonomous model generation."""
+"""Validate a recorded candidate through two real builds and one runtime check."""
 import hashlib
 import json
 import os
@@ -9,6 +9,18 @@ import signal
 import subprocess
 import time
 import uuid
+
+FROM_PIN = re.compile(r"FROM \S+@sha256:[0-9a-f]{64}")
+MAKE_MISSING = re.compile(r"(?:/bin/(?:sh|bash|dash):.*)?\bmake: (?:not found|command not found)")
+INFRASTRUCTURE_TERMS = (
+    "failed to resolve source metadata",
+    "failed to do request",
+    "connection reset",
+    "no such host",
+    "i/o timeout",
+    "tls handshake",
+)
+
 
 def instructions(text):
     result, pending = [], ""
@@ -29,13 +41,16 @@ def prepare_candidate(broken, candidate):
     original, proposed = instructions(broken), instructions(candidate)
     if not original or not proposed:
         raise ValueError("Empty Dockerfile")
-    if not re.fullmatch(r"FROM \S+@sha256:[0-9a-f]{64}", proposed[0]):
+    base, head = original[0], proposed[0]
+    if not FROM_PIN.fullmatch(head):
         raise ValueError("Candidate must start with a digest-pinned FROM")
     if sum(line.upper().startswith("FROM ") for line in proposed) != 1:
         raise ValueError("Only single-stage candidates are supported")
-    if original[0] != proposed[0].split("@", 1)[0]:
-        raise ValueError("Candidate changed the original base image tag")
-    baseline = [proposed[0], *original[1:]]
+    if head.split("@", 1)[0] != base.split("@", 1)[0]:
+        raise ValueError("Candidate changed the original base image")
+    if "@sha256:" in base and head.split("@", 1)[1] != base.split("@", 1)[1]:
+        raise ValueError("Candidate changed the pinned digest")
+    baseline = [head, *original[1:]]
     cursor, added = 0, []
     for line in proposed:
         if cursor < len(baseline) and line == baseline[cursor]:
@@ -59,9 +74,9 @@ def execute(argv, stdout, stderr, timeout):
             raise TimeoutError(f"Docker client command exceeded {timeout}s")
 
 def classify_failure(text):
-    if re.search(r"/bin/sh:.*\bmake: (?:not found|command not found)", text):
+    if MAKE_MISSING.search(text):
         return "MISSING_MAKE"
-    if any(term in text.lower() for term in ("failed to resolve source metadata", "failed to do request", "connection reset", "no such host")):
+    if any(term in text.lower() for term in INFRASTRUCTURE_TERMS):
         return "INFRASTRUCTURE"
     return "OTHER_BUILD_ERROR"
 
@@ -83,9 +98,14 @@ def auto_build(fixture, candidate, output, expected_output, timeout=300, verify_
     baseline = prepare_candidate((fixture / "Dockerfile.broken").read_text(encoding="utf-8"), text)
     output.mkdir(parents=True, exist_ok=True)
     run_id = uuid.uuid4().hex
-    report = {"status": "RUNNING", "detector": "DRAFT_TEACHING_REPLAY", "trace_id": "e6-b-" + run_id,
-              "candidate_source": "Manual model response replay; no model/API call in this command",
-              "candidate_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "attempts": []}
+    report = {
+        "status": "RUNNING",
+        "detector": "DRAFT_E7_AUTOBUILD",
+        "trace_id": "e7-b-" + run_id,
+        "candidate_source": "Recorded response replay; no model/API call in this command",
+        "candidate_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "attempts": [],
+    }
     started = time.monotonic()
     cid_path = output / "verify-container-id.txt"
     try:
@@ -98,14 +118,19 @@ def auto_build(fixture, candidate, output, expected_output, timeout=300, verify_
             iteration.mkdir()
             path = iteration / "Dockerfile"
             path.write_text(dockerfile, encoding="utf-8")
-            tag = f"e6-draft-replay:{run_id}-{number}"
+            tag = f"e7-draft-replay:{run_id}-{number}"
             command = ["docker", "build", "--progress=plain", "-f", str(path), "-t", tag, str(project)]
-            attempt = {"iteration": number, "tag": tag, "command": command}
+            attempt = {
+                "iteration": number,
+                "tag": tag,
+                "command": command,
+                "dockerfile_sha256": hashlib.sha256(dockerfile.encode("utf-8")).hexdigest(),
+            }
             report["attempts"].append(attempt)
             code = execute(command, iteration / "build-stdout.log", iteration / "build-stderr.log", timeout)
             attempt["build_exit_code"] = code
             if number == 1:
-                logs = (iteration / "build-stdout.log").read_text() + (iteration / "build-stderr.log").read_text()
+                logs = (iteration / "build-stdout.log").read_text(encoding="utf-8") + (iteration / "build-stderr.log").read_text(encoding="utf-8")
                 attempt["failure_class"] = classify_failure(logs)
                 if code == 0 or attempt["failure_class"] != "MISSING_MAKE":
                     raise ValueError("Baseline did not reproduce missing make; infrastructure errors do not count")
@@ -116,7 +141,7 @@ def auto_build(fixture, candidate, output, expected_output, timeout=300, verify_
             code = execute(["docker", "image", "inspect", tag], inspect_path, iteration / "inspect-stderr.log", 30)
             if code != 0:
                 raise ValueError("Cannot inspect built image")
-            image_id = json.loads(inspect_path.read_text())[0]["Id"]
+            image_id = json.loads(inspect_path.read_text(encoding="utf-8"))[0]["Id"]
             attempt["image_id"] = image_id
             verify = ["docker", "run", "--rm", "--network", "none", "--cpus", "1", "--memory", "128m",
                       "--pids-limit", "64", "--cidfile", str(cid_path), image_id]
@@ -133,7 +158,7 @@ def auto_build(fixture, candidate, output, expected_output, timeout=300, verify_
         report.update(status="FAILED", error=str(exc))
     finally:
         if cid_path.exists():
-            cid = cid_path.read_text().strip()
+            cid = cid_path.read_text(encoding="utf-8").strip()
             if re.fullmatch(r"[0-9a-f]{64}", cid):
                 try:
                     execute(["docker", "rm", "-f", cid], output / "cleanup.log", output / "cleanup-stderr.log", 15)
