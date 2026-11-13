@@ -1,0 +1,13 @@
+轨道,检查项,预期,实际结果,证据路径或链接,PASS或FAIL
+A,原始三次,精确MD与RD一致,不适用：本组为B轨道,不适用,N/A
+A,修复,findings为空且仅Makefile变化,不适用：本组为B轨道,不适用,N/A
+A,故障,FAILED或UNSUPPORTED或TIMED_OUT符合场景,不适用：本组为B轨道,不适用,N/A
+B,正常,两轮构建与同镜像hello E3,第一轮MISSING_MAKE；第二轮exit 0；同一镜像输出hello E3,work/e7-01/gate/success/,PASS
+B,故障,输出不符及无效候选及构建失败及超时均识别,四个故障场景均按预期识别,work/e7-01/gate/gate-result.json,PASS
+B,清理,运行超时容器已移除,cleanup-check返回No such container,work/e7-01/gate/runtime-timeout/evidence/cleanup-check/stderr.log,PASS
+共同,新增测试,输入预期明确且测试通过,第二条FROM在构建前被拒绝；最终26项测试通过,services/draft/tests/test_autobuild.py,PASS
+共同,正常CI,检查通过且artifact已下载,运行43391226016结论success且artifact已下载,work/ci-normal/,PASS
+共同,保护,检查名正确且strict与enforce_admins为true,e7-b-quality-gate；App ID 15368；strict=true；enforce_admins=true,work/ci-rejection/protection.json,PASS
+共同,拒绝合并,OPEN及BLOCKED且普通合并退出1,PR #2为OPEN和blocked；HTTP 405；记录退出码1,work/ci-rejection/merge-rejection.log,PASS
+共同,恢复,同一PR最新检查通过,PR #2修复后运行43392043785结论success,https://github.com/Wither-37/devops2026-e7-b10/pull/2,PASS
+共同,合并,MERGED及mergeCommit及mergedAt记录齐全,mergeCommit=9e1c6b7c7a729aea52dabe936354ddb158b530f0；mergedAt=2026-11-13T08:18:36Z,work/ci-recovery/PR-merged.json,PASS
